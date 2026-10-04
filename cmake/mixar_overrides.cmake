@@ -94,3 +94,9 @@ if(SCCACHE_PROGRAM)
 else()
   message(STATUS "sccache not found - building without compiler cache")
 endif()
+
+# Wayland app id. Desktop shells match a Wayland window to its .desktop file by
+# this id (the X11 equivalent is WM_CLASS, already "Mixar" in the GHOST X11
+# overlay). Upstream's default is "blender", which shows Blender's icon, or
+# none at all, for Mixar windows.
+set(WITH_GHOST_WAYLAND_APP_ID "mixar" CACHE STRING "Wayland app identifier" FORCE)
