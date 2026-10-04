@@ -61,6 +61,24 @@ When that compiler changes, old CMake configuration is backed up under the build
 directory's `.mixar-toolchain-backups/` before configuring again. Target objects
 are retained; reapply any options previously set only in the CMake cache.
 
+On Linux, `make init` also needs **git-lfs** (the pinned `upstream/lib/linux_x64`
+libraries are LFS payloads), plus the usual Blender system headers (X11, Wayland,
+`wayland-protocols`, `libdecor`, `libxkbcommon`) and `libsecret` for keyring
+token storage. Without an NVIDIA GPU, set `MIXAR_CUDA=0` in `.env` to skip the
+CUDA kernels. The build installs a portable tree; launch `build/<env>/bin/mixar`
+(or `make run <env>`). The first launch opens your browser for SSO through
+`xdg-open`.
+
+The Agent Bubble's native window behaviour on Linux (header drag, minimise to the
+pill, the borderless pill) is implemented for **X11 only**. Blender prefers
+Wayland when it is available, and there the bubble works as an ordinary window
+without those controls. To get them in a Wayland session, run Mixar under
+XWayland by setting `MIXAR_LINUX_BACKEND=x11` in `.env`; `make run` then
+launches it on X11 (an environment variable of the same name overrides `.env`).
+`make desktop` (or `make desktop Dev`) installs a per-user app-menu launcher for
+that build which goes through the same `run.sh`;
+`scripts/unix/install_desktop_entry.sh --uninstall` removes it.
+
 ### Quickstart
 
 ```bash
@@ -100,7 +118,7 @@ make install        # install embedded Python packages into the built app
 
 ```bash
 make run                 # launch build/Dev
-make run Prod            # launch build/Prod
+make run Prod            # launch build/Prod (macOS .app or Linux bin/mixar)
 
 # Standalone tests run outside Blender; conftest.py supplies bpy stubs.
 python -m pip install pytest Pillow numpy
