@@ -1,0 +1,251 @@
+# SPDX-FileCopyrightText: 2026 Adeveda Enterprises Private Limited
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Arch package for Mixar (Blender 5.2 fork), built from the git checkout that
+# contains this PKGBUILD.
+#
+#   cd packaging/arch && makepkg -si
+#
+# What gets built is the COMMITTED state of $MIXAR_BRANCH (default
+# feature/linux-support) in that checkout, so `git pull` there first to pick up
+# new upstream work. Outside a checkout it falls back to the GitHub fork.
+#
+# Blender itself is the commit pinned by the `upstream` submodule, built against
+# Blender's precompiled lib/linux_x64 (the same portable layout as the official
+# Linux builds and Mixar's `make build`). Both are fetched shallow, with their
+# Git LFS payloads (~3 GB), into persistent caches next to this file, so
+# rebuilds and `makepkg -C` only download what a new pin changes.
+#
+# Build knobs (environment):
+#   MIXAR_BRANCH      branch to package             (feature/linux-support)
+#   MIXAR_CUDA_ARCH   Cycles cubins, e.g. sm_120    (detected from nvidia-smi)
+#   MIXAR_CUDA=0      no CUDA/OptiX at all
+#   BUILD_CORES       parallel jobs                 (-jN from MAKEFLAGS, else nproc)
+
+pkgname=mixar-git
+pkgver=4.2.2.r1203.g25b62b3
+pkgrel=1
+pkgdesc='AI-powered 3D content creation suite built on Blender (portable build)'
+arch=(x86_64)
+url='https://github.com/Shiro836/mixar-linux'
+license=('GPL-3.0-or-later' 'GPL-2.0-or-later' 'LicenseRef-Mixar-Brand')
+depends=(
+  curl
+  gcc-libs
+  glibc
+  libdecor
+  libglvnd
+  libsecret
+  libx11
+  libxfixes
+  libxi
+  libxkbcommon
+  libxrender
+  libxxf86vm
+  openssl
+  wayland
+  xdg-utils  # SSO sign-in opens the browser through xdg-open
+)
+makedepends=(
+  cmake
+  cuda
+  git
+  git-lfs
+  libdecor
+  ninja
+  patchelf
+  python
+  rsync
+  unzip
+  wayland-protocols
+)
+optdepends=(
+  'nvidia-utils: Cycles CUDA/OptiX rendering'
+  'cuda: compile Cycles kernels at runtime for GPUs without a prebuilt cubin'
+  'kwallet: Secret Service provider for the stored sign-in (Plasma)'
+  'gnome-keyring: Secret Service provider for the stored sign-in'
+)
+provides=(mixar)
+conflicts=(mixar)
+# Release flags come from Blender's own CMake; LTO and makepkg's -g only bloat
+# a tree this size, and the bundled Python/libs are shipped as upstream builds them.
+options=(!lto !debug !strip)
+
+_branch=${MIXAR_BRANCH:-feature/linux-support}
+if _repo=$(git -C "$startdir" rev-parse --show-toplevel 2>/dev/null); then
+  _mixar_src="git+file://$_repo#branch=$_branch"
+else
+  _mixar_src="git+https://github.com/Shiro836/mixar-linux.git#branch=$_branch"
+fi
+source=("mixar::$_mixar_src"
+        https://developer.download.nvidia.com/redist/optix/v8.0/OptiX-8.0-Include.zip
+        mixar.sh)
+sha512sums=('SKIP'
+            '5502d9df847de12badc702c0444bd4f1f7620460b2235026df2c3133da1e04c148af0f1fc7f345e9a0c009c32f905f66c8d427743445e8864d3a797cdce6a483'
+            '6ee7f9af7ea7a5442722d1924eefa1959a798496c0306bf859f9e4c1badba539f2b4cbc881cc03f72d130b952ca7b13d8f21379c1eb806e2786561b6903d36d6')
+
+pkgver() {
+  cd mixar
+  printf '%s.r%s.g%s' "$(tr -d '[:space:]' < VERSION)" \
+    "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+# Check out one pinned commit of $1 into $3, LFS content included.
+#
+# The objects live in a shallow bare cache under $SRCDEST that is never wiped;
+# the checkout borrows them through alternates and reads LFS objects straight
+# from the cache, so a re-checkout copies nothing over the network. A checkout
+# already at the pin is left untouched to keep its mtimes, which is what keeps
+# rebuilds incremental.
+_checkout_pinned() {
+  local url=$1 sha=$2 dest=$3
+  local cache="$SRCDEST/${url##*/}"
+
+  if [[ ! -d $cache ]]; then
+    git init --quiet --bare "$cache"
+    git -C "$cache" remote add origin "$url"
+  fi
+  if ! git -C "$cache" cat-file -e "$sha^{commit}" 2>/dev/null; then
+    msg2 "Fetching ${url##*/} at ${sha:0:12} (shallow)"
+    GIT_LFS_SKIP_SMUDGE=1 git -C "$cache" fetch --depth 1 origin "$sha"
+  fi
+  # A ref keeps the pinned commit alive across gc.
+  git -C "$cache" update-ref "refs/pinned/$sha" "$sha"
+  msg2 "Fetching Git LFS objects for ${url##*/}"
+  git -C "$cache" lfs fetch origin "$sha"
+
+  if [[ ! -d $dest/.git ]]; then
+    rm -rf "$dest"
+    git init --quiet "$dest"
+    echo "$cache/objects" > "$dest/.git/objects/info/alternates"
+    git -C "$dest" config lfs.storage "$cache/lfs"
+  fi
+  cp "$cache/shallow" "$dest/.git/shallow"
+  # makepkg hides ~/.gitconfig, and with it any global LFS filter setup.
+  git -C "$dest" lfs install --local >/dev/null
+  if [[ $(git -C "$dest" rev-parse -q --verify HEAD) != "$sha" ]]; then
+    msg2 "Checking out ${url##*/} at ${sha:0:12}"
+    GIT_LFS_SKIP_SMUDGE=1 git -C "$dest" checkout --quiet --force --detach "$sha"
+  fi
+  # Replaces only files that are still pointers; real content keeps its mtime.
+  git -C "$dest" lfs checkout
+  # lfs checkout exits 0 even when it did nothing; a leftover pointer ("-")
+  # would otherwise surface much later as a broken library or asset.
+  if git -C "$dest" lfs ls-files | grep -q '^[0-9a-f]* - '; then
+    error "${url##*/}: Git LFS pointers left in $dest"
+    return 1
+  fi
+}
+
+prepare() {
+  local blender_url blender_sha lib_url lib_sha
+  blender_url=$(git -C mixar config -f .gitmodules submodule.upstream.url)
+  blender_sha=$(git -C mixar rev-parse HEAD:upstream)
+  _checkout_pinned "$blender_url" "$blender_sha" "$srcdir/blender"
+
+  lib_url=$(git -C blender config -f .gitmodules submodule.lib/linux_x64.url)
+  lib_sha=$(git -C blender rev-parse HEAD:lib/linux_x64)
+  _checkout_pinned "$lib_url" "$lib_sha" "$srcdir/blender/lib/linux_x64"
+
+  # Full command lines for every compile bury real errors in the makepkg log.
+  sed -i 's/ --verbose"$/"/' mixar/scripts/unix/settings.sh
+}
+
+build() {
+  cd mixar
+
+  # nvcc and its host-compiler pin only exist in login shells (profile.d).
+  if [[ -x /opt/cuda/bin/nvcc ]]; then
+    export PATH="/opt/cuda/bin:$PATH" CUDA_PATH=/opt/cuda
+    if [[ -z ${NVCC_CCBIN:-} && -r /etc/profile.d/cuda.sh ]]; then
+      eval "$(grep -E '^export NVCC_CCBIN=' /etc/profile.d/cuda.sh)"
+    fi
+  fi
+  # Cubins only for the GPUs in this machine unless told otherwise; Mixar's
+  # default list compiles the whole Cycles kernel once per architecture.
+  if [[ -z ${MIXAR_CUDA_ARCH:-} ]] && command -v nvidia-smi >/dev/null; then
+    MIXAR_CUDA_ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+      | sed -n 's/^\([0-9]*\)\.\([0-9]*\)$/sm_\1\2/p' | sort -u | paste -sd,)
+  fi
+  [[ -n ${MIXAR_CUDA_ARCH:-} ]] && export MIXAR_CUDA_ARCH
+
+  if [[ -z ${BUILD_CORES:-} ]]; then
+    BUILD_CORES=$(sed -n 's/.*-j *\([0-9][0-9]*\).*/\1/p' <<< "${MAKEFLAGS:-}")
+    BUILD_CORES=${BUILD_CORES:-$(nproc)}
+  fi
+
+  # Same adjustments as Arch's blender package.
+  CXXFLAGS=${CXXFLAGS/-Wp,-D_GLIBCXX_ASSERTIONS/}
+  CXXFLAGS+=' -Wno-error=format-security'
+
+  export MIXAR_ENV=Prod
+  export MIXAR_UPSTREAM_DIR="$srcdir/blender"
+  export OPTIX_ROOT_DIR="$srcdir"
+  export CMAKE_GENERATOR=Ninja
+  # Config files inside the precompiled libs predate CMake 4.
+  export CMAKE_POLICY_VERSION_MINIMUM=3.5
+  export BUILD_CORES CXXFLAGS
+
+  ./scripts/unix/build.sh
+}
+
+package() {
+  cd mixar
+  local bin=build/Prod/bin dest="$pkgdir/opt/mixar" f
+
+  install -d "$dest"
+  cp -a "$bin/." "$dest/"
+
+  # The portable install prefix is also where the build-host code generators
+  # (makesdna, datatoc, ...) are linked. Keep top-level files the install
+  # recorded, plus the mixar* targets CMake leaves out of the manifest because
+  # they are built in place.
+  for f in "$dest"/*; do
+    [[ -f $f ]] || continue
+    case ${f##*/} in mixar*) continue ;; esac
+    grep -qxF "$PWD/$bin/${f##*/}" build/Prod/install_manifest.txt || rm -v "$f"
+  done
+
+  # Bytecode written while the build ran pip carries build-tree paths. Rebuild
+  # all of it against the final location; /opt is read-only at runtime, so
+  # anything left uncompiled would be recompiled in memory on every launch.
+  local pydir=("$dest"/*/python) py
+  py=("${pydir[0]}"/bin/python3.[0-9]*)
+  find "$dest" -name __pycache__ -type d -prune -exec rm -rf {} +
+  "${py[0]}" -B -m compileall -q -j0 -s "$pkgdir" -p / "${pydir[0]%/python}" >/dev/null || true
+
+  # pip's console scripts point at the build tree's interpreter.
+  sed -i "1s|^#!$PWD/$bin/|#!/opt/mixar/|" "${pydir[0]}"/lib/python3.*/site-packages/bin/*
+
+  # The glTF Draco/meshopt bridges are copied with their build RUNPATH
+  # ($ORIGIN/lib, which does not exist next to them, then the build tree).
+  # Python dlopens them, so nothing else resolves libdraco: aim them at lib/.
+  local so
+  while IFS= read -r -d '' so; do
+    patchelf --print-rpath "$so" 2>/dev/null | grep -qF "$srcdir" || continue
+    patchelf --set-rpath "\$ORIGIN/$(realpath -m --relative-to="${so%/*}" "$dest/lib")" "$so"
+  done < <(find "$dest" -type f -name '*.so*' -print0)
+
+  install -Dm755 "$srcdir/mixar.sh" "$pkgdir/usr/bin/mixar"
+
+  # Menu entry: the build's own (the launcher defaults to XWayland), plus an
+  # action for native Wayland, where the Agent Bubble loses its own chrome.
+  sed -e 's/^Exec=.*/Exec=mixar %f/' -e 's/^Icon=.*/Icon=mixar/' \
+      -e '/^\[Desktop Entry\]/a Actions=wayland;' "$bin/mixar.desktop" \
+    | install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/mixar.desktop"
+  cat >> "$pkgdir/usr/share/applications/mixar.desktop" << 'EOF'
+
+[Desktop Action wayland]
+Name=Mixar on native Wayland
+Exec=env MIXAR_LINUX_BACKEND=auto mixar %f
+EOF
+  install -Dm644 "$bin/mixar.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/mixar.svg"
+  install -Dm644 "$bin/mixar-symbolic.svg" \
+    "$pkgdir/usr/share/icons/hicolor/symbolic/apps/mixar-symbolic.svg"
+  install -Dm644 src/release/freedesktop/org.mixar.Mixar.metainfo.xml \
+    -t "$pkgdir/usr/share/metainfo"
+
+  install -Dm644 LICENSE NOTICE.md TRADEMARKS.md LICENSES/* \
+    -t "$pkgdir/usr/share/licenses/$pkgname"
+}

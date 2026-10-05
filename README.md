@@ -77,6 +77,14 @@ launches it on X11 (an environment variable of the same name overrides `.env`).
 that build which goes through the same `run.sh`;
 `scripts/unix/install_desktop_entry.sh --uninstall` removes it.
 
+On Arch Linux, `packaging/arch/PKGBUILD` builds the same portable tree into a
+pacman package (`cd packaging/arch && makepkg -si`): Mixar lands in `/opt/mixar`
+with a `mixar` launcher that starts on X11/XWayland by default, so the Agent
+Bubble keeps its native window controls (`MIXAR_LINUX_BACKEND=auto` or the menu
+entry's "native Wayland" action opts out). It packages the committed state of
+the checkout it sits in, and caches the pinned Blender sources and libraries
+next to the PKGBUILD so rebuilds only download what a new pin changes.
+
 ### Quickstart
 
 ```bash
